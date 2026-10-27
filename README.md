@@ -1,4 +1,4 @@
-markdown
+
 <div align="center">
 
 <img src="https://capsule-render.vercel.app/api?type=waving&height=200&color=0:00F5FF,50:7B2CFF,100:FF00A8&text=BTKILL&fontSize=80&fontColor=FFFFFF&fontAlignY=40&animation=fadeIn" width="100%" alt="BTKILL">
@@ -32,7 +32,66 @@ The project combines operational statistics, adaptive pacing, and hardware diagn
 
 ---
 
-## 02 / FEATURES
+## 02 / ARCHITECTURE
+
+```mermaid
+flowchart TD
+
+subgraph group_linux["Linux tool"]
+  node_linux_cli["Linux CLI<br/>[btcpp.cpp]"]
+  node_linux_adapter["Adapter detection<br/>[btcpp.cpp]"]
+  node_linux_scan["Device scan<br/>[btcpp.cpp]"]
+  node_linux_vectors["Bluetooth vectors<br/>[btcpp.cpp]"]
+  node_linux_rf["RF disruption<br/>[btcpp.cpp]"]
+  node_linux_pacing["Adaptive pacing<br/>[btcpp.cpp]"]
+  node_linux_stats["Stats and probing<br/>[btcpp.cpp]"]
+end
+
+subgraph group_windows["Windows tool"]
+  node_windows_cli["Windows CLI<br/>[main.cpp]"]
+  node_windows_adapter["Radio detection<br/>[main.cpp]"]
+  node_windows_vectors["Bluetooth vectors<br/>[main.cpp]"]
+  node_windows_pacing["Adaptive pacing<br/>[main.cpp]"]
+  node_windows_stats["Live stats<br/>[main.cpp]"]
+end
+
+subgraph group_shared["Runtime capabilities"]
+  node_bluetooth(("Bluetooth device"))
+  node_rf_controller(("RF controller"))
+end
+
+node_user(("Assessment operator"))
+
+node_user -->|"sets options"| node_linux_cli
+node_linux_cli -.->|"checks adapter"| node_linux_adapter
+node_linux_cli -->|"can scan"| node_linux_scan
+node_linux_cli -->|"selects vectors"| node_linux_vectors
+node_linux_vectors -->|"stresses links"| node_bluetooth
+node_linux_cli -.->|"configures RF mode"| node_linux_rf
+node_linux_rf -.->|"controls"| node_rf_controller
+node_linux_vectors -.->|"paces attempts"| node_linux_pacing
+node_linux_vectors -.->|"records outcomes"| node_linux_stats
+node_user -->|"sets options"| node_windows_cli
+node_windows_cli -->|"checks radios"| node_windows_adapter
+node_windows_cli -->|"starts vectors"| node_windows_vectors
+node_windows_vectors -->|"stresses links"| node_bluetooth
+node_windows_vectors -->|"adjusts delay"| node_windows_pacing
+node_windows_vectors -->|"updates counters"| node_windows_stats
+
+classDef toneBlue fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#172554
+classDef toneAmber fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#78350f
+classDef toneMint fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
+
+class node_linux_cli,node_linux_adapter,node_linux_scan,node_linux_vectors,node_linux_rf,node_linux_pacing,node_linux_stats toneBlue
+class node_windows_cli,node_windows_adapter,node_windows_vectors,node_windows_pacing,node_windows_stats toneAmber
+class node_bluetooth,node_rf_controller toneMint
+class node_user toneIndigo
+```
+
+---
+
+## 03 / FEATURES
 
 | FEATURE | DESCRIPTION |
 |:--|:--|
@@ -43,7 +102,7 @@ The project combines operational statistics, adaptive pacing, and hardware diagn
 
 ---
 
-## 03 / TESTING VECTORS
+## 04 / TESTING VECTORS
 
 | TESTING VECTOR | LINUX | WINDOWS |
 |:--|:--:|:--:|
@@ -58,7 +117,7 @@ The project combines operational statistics, adaptive pacing, and hardware diagn
 
 ---
 
-## 04 / SYSTEM REQUIREMENTS
+## 05 / SYSTEM REQUIREMENTS
 
 ### Linux / Kali Linux
 
@@ -75,7 +134,7 @@ The project combines operational statistics, adaptive pacing, and hardware diagn
 
 ---
 
-## 05 / INSTALLATION
+## 06 / INSTALLATION
 
 ### Linux / Kali Linux
 
@@ -103,7 +162,7 @@ chmod +x install.sh
 
 ---
 
-## 06 / COMMAND LINE
+## 07 / COMMAND LINE
 
 Display the available command-line options:
 
@@ -115,7 +174,7 @@ The executable name and available arguments may vary depending on the build conf
 
 ---
 
-## 07 / TELEMETRY
+## 08 / TELEMETRY
 
 | METRIC | DESCRIPTION |
 |:--|:--|
@@ -129,7 +188,7 @@ Actual measurements depend on the hardware, drivers, operating system, and testi
 
 ---
 
-## 08 / RESPONSIBLE USE
+## 09 / RESPONSIBLE USE
 
 - Test only devices you own or are authorized to assess.
 - Use a controlled testing environment.
@@ -139,7 +198,7 @@ Actual measurements depend on the hardware, drivers, operating system, and testi
 
 ---
 
-## 09 / LICENSE
+## 10 / LICENSE
 
 **PROPRIETARY SOFTWARE — ALL RIGHTS RESERVED**
 
@@ -162,4 +221,3 @@ BLUETOOTH SECURITY · RESILIENCE TESTING
 Developed by Mohammad Parham Dehghan
 
 </div>
-```
