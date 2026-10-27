@@ -1,21 +1,75 @@
-MIT License
+BTKILL — PROPRIETARY SOFTWARE LICENSE
 
-Copyright (c) 2026 btkill contributors
+Copyright (c) 2026 btkill contributors. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Ownership
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+The Software, including its source code, object code, documentation, and associated materials, is protected by applicable copyright and intellectual property laws.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Except for rights expressly granted in writing by the copyright holder, all rights are reserved.
+
+2. Restrictions
+
+Unless expressly authorized in writing by the copyright holder, no person or entity may:
+
+- Copy, reproduce, redistribute, publish, or sublicense the Software or substantial portions of it.
+- Modify, adapt, translate, or create derivative works based on the Software.
+- Sell, rent, lease, commercially exploit, or otherwise distribute the Software.
+- Remove, alter, or obscure copyright notices, attribution, or proprietary notices.
+- Represent the Software or derivative works as their own original work.
+
+Any permission granted under this License is limited to its expressly stated scope.
+
+3. No Implied License
+
+Possession of, access to, or publication of the Software does not, by itself, grant permission to copy, modify, redistribute, or commercially exploit it.
+
+Any rights not expressly granted are reserved by the copyright holder.
+
+4. User Responsibility and Lawful Use
+
+The recipient is responsible for their own use of the Software and for ensuring that such use complies with applicable laws, regulations, authorization requirements, and third-party rights.
+
+The Software must not be used to interfere with systems, communications, or devices without appropriate authorization.
+
+To the maximum extent permitted by applicable law, the copyright holder disclaims responsibility for unauthorized or unlawful uses by recipients and for consequences arising from uses outside the scope of an express written authorization.
+
+Nothing in this section excludes or limits liability where such exclusion or limitation is prohibited by law.
+
+5. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDER DISCLAIMS ALL WARRANTIES RELATING TO THE SOFTWARE.
+
+6. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES, INCLUDING LOSS OF DATA, PROFITS, BUSINESS, OR SYSTEM AVAILABILITY, ARISING OUT OF OR IN CONNECTION WITH THE SOFTWARE or its use.
+
+Nothing in this License excludes or limits liability that cannot lawfully be excluded or limited.
+
+7. Enforcement
+
+Unauthorized copying, distribution, modification, or other use outside the scope of permission granted by the copyright holder may constitute copyright infringement or another violation of applicable law.
+
+The copyright holder reserves the right to pursue remedies available under applicable law, subject to the relevant legal requirements.
+
+8. Third-Party Rights
+
+This License does not grant rights to third-party software, trademarks, patents, or other materials that may be included with or referenced by the Software. Such materials may be subject to separate terms.
+
+9. Termination
+
+Any permission expressly granted under this License may terminate upon a material breach of its terms, subject to applicable law and any mandatory notice or cure requirements.
+
+Upon termination, the recipient must cease activities no longer authorized by the applicable permission.
+
+10. Governing Law
+
+The governing law and jurisdiction, if specified in a separate written agreement, shall apply to that agreement. Otherwise, applicable conflict-of-law rules determine the governing law and competent forum.
+
+11. Entire License
+
+This License describes the terms governing use of the Software to the extent permitted by applicable law. Any additional permission must be granted in writing by the copyright holder.
+
+All rights not expressly granted are reserved.
